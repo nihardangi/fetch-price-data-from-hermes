@@ -82,6 +82,8 @@ In depth breakdown:
 ```
 
 6. Body Header (51 bytes)
+
+```
    Layout (big-endian):
    u32 timestamp
    u32 nonce
@@ -89,6 +91,7 @@ In depth breakdown:
    bytes32 emitter_address
    u64 sequence
    u8 consistency_level
+```
 
 ```
    685db97d00000000001ae101faedac5851e32b9b23b5f9411a8c2bac4aae3ed4dd7b811dd1a72ea4aa7100000000086ac27b01
