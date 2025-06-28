@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -12,7 +13,15 @@ import (
 const (
 	hermesLatestPriceUpdateUrl = "https://hermes.pyth.network/v2/updates/price/latest"
 	pnauVAAWrapperLength       = 10
-	bodyHeaderLength           = 51
+	guardianSetBytes           = 4
+	sigCountBytes              = 1
+	bytesPerSignature          = 66
+	bodyHeaderBytes            = 51
+	vaaSizeBytes               = 2
+	majorBytes                 = 1
+	minorBytes                 = 1
+	trailingHeaderTotalBytes   = 1
+	proofTypeBytes             = 1
 )
 
 var (
@@ -28,134 +37,92 @@ func FetchLatestPriceFeedData(priceFeedIDs []string) (string, error) {
 		hermesLatestPriceUpdateUrl,
 		nil,
 	)
+	// Prepare URL
 	q := req.URL.Query()
 	for _, priceFeedID := range priceFeedIDs {
 		q.Add("ids[]", priceFeedID)
 	}
 	req.URL.RawQuery = q.Encode()
-	fmt.Println("url-----", req.URL.String())
+	// Send request
 	response, err := httpClient.Do(req)
 	if err != nil {
-
+		return "", err
 	}
 	if response.StatusCode != http.StatusOK {
-		fmt.Println("Status code------", response.StatusCode)
-		// Add error
-		return "", nil
+		err := fmt.Errorf("status code not 200, received status code: %d", response.StatusCode)
+		return "", err
 	}
+	// Parse the response received from API
 	latestPriceUpdateResponse, err := handleLatestPriceUpdateResponse(response)
 	if err != nil {
-		fmt.Println("handling response error-----", err)
 		return "", err
 	}
 	if len(latestPriceUpdateResponse.Binary.Data) == 0 {
-		// Add error here
+		err := errors.New("no data received in API repsonse")
 		return "", err
 	}
 	return latestPriceUpdateResponse.Binary.Data[0], nil
 }
 
-func PrepareDataForUpdatePriceFeeds(hexEncodedData string, priceFeedIDs []string) {
+func PrepareDataForUpdatePriceFeeds(hexEncodedData string, priceFeedIDs []string) (string, error) {
+	// Add priceFeedIDs to a map for uniqueness and faster search
 	priceFeedIDsMap := make(map[string]bool, len(priceFeedIDs))
 	for _, priceFeedID := range priceFeedIDs {
 		priceFeedIDsMap[priceFeedID] = true
 	}
+	// Convert hex string to bytes
 	originalDataBytes, err := hex.DecodeString(hexEncodedData)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return "", err
 	}
 	var newDataBytes []byte
-	for i := 0; i < len(originalDataBytes); i++ {
-		// New logic
-		cursor := 0
-		newDataBytes, cursor = extractAndAddPNAUWrapper(cursor, originalDataBytes, newDataBytes)
-		newDataBytes, cursor = extractAndAddWormholeVAA(cursor, originalDataBytes, newDataBytes)
-		newDataBytes, cursor = extractAndAddBodyHeader(cursor, originalDataBytes, newDataBytes)
+	cursor := 0
+	newDataBytes, cursor = extractAndAddPNAUWrapper(cursor, originalDataBytes, newDataBytes)
+	newDataBytes, cursor = extractAndAddWormholeVAA(cursor, originalDataBytes, newDataBytes)
+	newDataBytes, cursor = extractAndAddBodyHeader(cursor, originalDataBytes, newDataBytes)
+	newDataBytes, cursor = extractAndAddAccumulatorUpdateHeader(cursor, originalDataBytes, newDataBytes)
+	newDataBytes, cursor = extractAndAddVAASizeAndVAA(cursor, originalDataBytes, newDataBytes)
 
-		i = cursor
+	// Extract and add unknown bytes
+	unknownBytesLength := 14
+	newDataBytes = append(newDataBytes, originalDataBytes[cursor:cursor+unknownBytesLength]...)
+	cursor += unknownBytesLength
 
-		// Magic 0x41555756 ("AUWV"). (Mnemonic: Accumulator-Update Wormhole Verification)
-		magicBytesLength := 4
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(magicBytesLength)]...)
-		i += magicBytesLength
-
-		// Major version
-		majorBytesLength := 1
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(majorBytesLength)]...)
-		i += majorBytesLength
-
-		// Minor version
-		minorBytesLength := 1
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(minorBytesLength)]...)
-		i += minorBytesLength
-
-		// Trailing header size
-		trailingHeaderTotalBytes := 1
-		buf2 := bytes.NewReader(originalDataBytes[i : i+trailingHeaderTotalBytes])
-		var trailingHeaderLength uint8
-		if err := binary.Read(buf2, binary.BigEndian, &trailingHeaderLength); err != nil {
-			fmt.Println(err)
-			return
-		}
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+trailingHeaderTotalBytes]...)
-		i += trailingHeaderTotalBytes
-
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(trailingHeaderLength)]...)
-		i += int(trailingHeaderLength)
-		fmt.Println("trailingHeaderLen", trailingHeaderLength)
-
-		// Proof type
-		proofTypeBytesLength := 1
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+proofTypeBytesLength]...)
-		fmt.Println("proof type bytes-----------", originalDataBytes[i:i+proofTypeBytesLength])
-		i += proofTypeBytesLength
-
-		newDataBytes, i = extractAndAddVAASizeAndVAA(i, originalDataBytes, newDataBytes)
-
-		// Unknown bytes
-		unknownBytesLength := 14
-		newDataBytes = append(newDataBytes, originalDataBytes[i:i+unknownBytesLength]...)
-		i += unknownBytesLength
-
-		// Number of updates
-		numberOfUpdatesBytesLength := 1
-		buf4 := bytes.NewReader(originalDataBytes[i : i+numberOfUpdatesBytesLength])
-		var numberOfUpdates uint8
-		if err := binary.Read(buf4, binary.BigEndian, &numberOfUpdates); err != nil {
-			fmt.Println(err)
-			return
-		}
-		var newNumberOfUpdates uint8 = uint8(len(priceFeedIDsMap))
-		newDataBytes = append(newDataBytes, byte(newNumberOfUpdates))
-		fmt.Println("new updates", byte(newNumberOfUpdates))
-		i += numberOfUpdatesBytesLength
-
-		// Parse each update
-		cursor = i
-		for j := 0; j < int(numberOfUpdates); j++ {
-			newDataBytes, cursor = extractAndAddPriceFeedDataIfPresentInMap(cursor, priceFeedIDsMap, originalDataBytes, newDataBytes)
-			fmt.Println("after body header-------", hex.EncodeToString(newDataBytes))
-			// break
-			i = cursor
-			// fmt.Println("next bytes----", originalDataBytes[i:i+2])
-		}
-		// break
-		// i = cursor
-
-		// fmt.Println(originalDataBytes[i : i+5])
-
+	// Extract Number of updates
+	numberOfUpdatesBytesLength := 1
+	buf4 := bytes.NewReader(originalDataBytes[cursor : cursor+numberOfUpdatesBytesLength])
+	var numberOfUpdates uint8
+	if err := binary.Read(buf4, binary.BigEndian, &numberOfUpdates); err != nil {
+		fmt.Println(err)
+		return "", err
 	}
-	// fmt.Println(hex.EncodeToString(newDataBytes))
+	// Add new number of updates i.e total entries in our map.
+	var newNumberOfUpdates uint8 = uint8(len(priceFeedIDsMap))
+	newDataBytes = append(newDataBytes, byte(newNumberOfUpdates))
+	fmt.Println("new updates", byte(newNumberOfUpdates))
+	cursor += numberOfUpdatesBytesLength
 
+	// Parse each update
+	for j := 0; j < int(numberOfUpdates); j++ {
+		newDataBytes, cursor = extractAndAddPriceFeedDataIfPresentInMap(cursor, priceFeedIDsMap, originalDataBytes, newDataBytes)
+	}
+	fmt.Println("newHexData", hex.EncodeToString(newDataBytes))
+	return hex.EncodeToString(newDataBytes), nil
 }
 
+// Extracts and adds 10 byte long PNAU wrapper.
 func extractAndAddPNAUWrapper(i int, originalDataBytes, newDataBytes []byte) ([]byte, int) {
 	newDataBytes = append(newDataBytes, originalDataBytes[i:i+pnauVAAWrapperLength]...)
 	i += pnauVAAWrapperLength
 	return newDataBytes, pnauVAAWrapperLength
 }
 
+// Extracts and add wormhole VAA fields:
+// 1. 1 byte version length
+// 2. 4 byte guardian set
+// 3. 1 byte sig count
+// 4. Signatures usually 66*total signers where bytes in a signature is 66 and total signers is mostly 13
 func extractAndAddWormholeVAA(i int, originalDataBytes, newDataBytes []byte) ([]byte, int) {
 	// 1 byte version
 	versionLength := 1
@@ -163,57 +130,92 @@ func extractAndAddWormholeVAA(i int, originalDataBytes, newDataBytes []byte) ([]
 	i += versionLength
 
 	// 4 byte guardian_set
-	guardianSetLength := 4
-	newDataBytes = append(newDataBytes, originalDataBytes[i:i+guardianSetLength]...)
-	i += guardianSetLength
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+guardianSetBytes]...)
+	i += guardianSetBytes
 
 	// 1 byte sig_count
-	sigCountLength := 1
-	buf := bytes.NewReader(originalDataBytes[i : i+sigCountLength])
+	buf := bytes.NewReader(originalDataBytes[i : i+sigCountBytes])
 	var sigCount uint8
 	if err := binary.Read(buf, binary.BigEndian, &sigCount); err != nil {
 		// Add proper error handling
 		fmt.Println(err)
 		return []byte{}, 0
 	}
-	newDataBytes = append(newDataBytes, originalDataBytes[i:i+sigCountLength]...)
-	i += sigCountLength
-	fmt.Println("sigCount------", sigCount)
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+sigCountBytes]...)
+	i += sigCountBytes
 
 	// Wormhole VAA
 	var wormholeVAALength uint
-	wormholeVAALength = 66 * uint(sigCount)
-	fmt.Println("wormholeVAALen", wormholeVAALength)
+	wormholeVAALength = bytesPerSignature * uint(sigCount)
 	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(wormholeVAALength)]...)
 	i += int(wormholeVAALength)
-	fmt.Println("len after-------", len(newDataBytes))
 
 	return newDataBytes, i
 }
 
+// Extracts and add body header which is 51 bytes long
 func extractAndAddBodyHeader(i int, originalDataBytes, newDataBytes []byte) ([]byte, int) {
-	bodyHeaderLength := 51
-	newDataBytes = append(newDataBytes, originalDataBytes[i:i+bodyHeaderLength]...)
-	i += bodyHeaderLength
-	// fmt.Println("len after body header-------", len(newDataBytes))
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+bodyHeaderBytes]...)
+	i += bodyHeaderBytes
 	return newDataBytes, i
 }
 
-// func extractAccumulatorUpdate
+// Extracts and add fields in accumulator update header
+// 1. Magic bytes AUWV (4 bytes long)
+// 2. 1 byte long Major bytes
+// 3. 1 byte long minor bytes
+// 4. 1 byte long trailingHeaderSize
+// 5. trailingHeaderSize bytes long trailingHeader (usually 0 bytes long)
+// 6. 1 byte long proof type
+func extractAndAddAccumulatorUpdateHeader(i int, originalDataBytes, newDataBytes []byte) ([]byte, int) {
+	// Magic 0x41555756 ("AUWV"). (Mnemonic: Accumulator-Update Wormhole Verification)
+	magicBytesLength := 4
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(magicBytesLength)]...)
+	i += magicBytesLength
 
+	// Major version
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(majorBytes)]...)
+	i += majorBytes
+
+	// Minor version
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(minorBytes)]...)
+	i += minorBytes
+
+	// Trailing header size
+	buf2 := bytes.NewReader(originalDataBytes[i : i+trailingHeaderTotalBytes])
+	var trailingHeaderLength uint8
+	if err := binary.Read(buf2, binary.BigEndian, &trailingHeaderLength); err != nil {
+		fmt.Println(err)
+		// Add Proper error handling
+		return []byte{}, 0
+	}
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+trailingHeaderTotalBytes]...)
+	i += trailingHeaderTotalBytes
+
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(trailingHeaderLength)]...)
+	i += int(trailingHeaderLength)
+	// fmt.Println("trailingHeaderLen", trailingHeaderLength)
+
+	// Proof type
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+proofTypeBytes]...)
+	i += proofTypeBytes
+	return newDataBytes, i
+}
+
+// Extracts and add VAA size and VAA
+// 1. 2 byte long VAA size
+// 2. VAA size bytes long VAA
 func extractAndAddVAASizeAndVAA(i int, originalDataBytes, newDataBytes []byte) ([]byte, int) {
 	// Extract and add VAA size
-	vaaSizeBytesLength := 2
 	var vaaSize uint16
-	buf3 := bytes.NewReader(originalDataBytes[i : i+vaaSizeBytesLength])
+	buf3 := bytes.NewReader(originalDataBytes[i : i+vaaSizeBytes])
 	if err := binary.Read(buf3, binary.BigEndian, &vaaSize); err != nil {
 		fmt.Println(err)
 		// Add proper error handling
 		return []byte{}, 0
 	}
-	newDataBytes = append(newDataBytes, originalDataBytes[i:i+vaaSizeBytesLength]...)
-	i += vaaSizeBytesLength
-	fmt.Println("vaaSize------", vaaSize)
+	newDataBytes = append(newDataBytes, originalDataBytes[i:i+vaaSizeBytes]...)
+	i += vaaSizeBytes
 
 	// Extract and add VAA
 	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(vaaSize)]...)
@@ -221,6 +223,16 @@ func extractAndAddVAASizeAndVAA(i int, originalDataBytes, newDataBytes []byte) (
 	return newDataBytes, i
 }
 
+// Extracts and add price feed data
+//  1. Checks if price feed ID is present in map
+//     1.1 If present, add message size, price feed update data and all the proofs newDataBytes
+//     1.2 If not, skip everything related to priceFeedID i.e message size, price feed update data and all the proofs newDataBytes
+//
+// Message size is 2 bytes long, usually value is 85
+// PriceFeedUpdate Data's length will be equal to message size, usually 85
+// Num of proofs is 1 byte long
+// After num of proofs field, every proof will be present. Each proof is 20 bytes long.
+// For example: if num of proofs is 12, then total proof bytes will be 12*20= 240
 func extractAndAddPriceFeedDataIfPresentInMap(i int, priceFeedIDsMap map[string]bool, originalDataBytes, newDataBytes []byte) ([]byte, int) {
 	startIndex := i
 	// message size
@@ -237,10 +249,11 @@ func extractAndAddPriceFeedDataIfPresentInMap(i int, priceFeedIDsMap map[string]
 
 	// Extract Price Feed ID
 	priceFeedIDBytes := 32
+	// Adding 1 because in order to fetch priceFeedID, we have to skip the q byte long version
 	priceFeedID := hex.EncodeToString(originalDataBytes[i+1 : i+1+priceFeedIDBytes])
-	fmt.Println("priceFeedID---------", priceFeedID)
 
 	i += int(messageSize)
+	// Extract num of proofs
 	numOfProofsBytes := 1
 	buf2 := bytes.NewReader(originalDataBytes[i : i+numOfProofsBytes])
 	var numOfProofs uint8
@@ -249,23 +262,18 @@ func extractAndAddPriceFeedDataIfPresentInMap(i int, priceFeedIDsMap map[string]
 		// Add proper error handling
 		return []byte{}, 0
 	}
-	fmt.Println("numOFProofs------", numOfProofs)
+
 	singleProofBytes := 20
 	totalProofBytes := singleProofBytes * int(numOfProofs)
 	fmt.Println(i)
 	i += numOfProofsBytes + totalProofBytes
-	fmt.Println("i after----", i)
-	// i+=3+messageSize+
-	// break
-	// continue
-	if _, ok := priceFeedIDsMap[fmt.Sprintf("%s%s", "0x", priceFeedID)]; !ok {
-		// fmt.Println("INSIDE MAP ENTRY NOT FOUND CONDITION------")
+
+	priceFeedIDFormatted := fmt.Sprintf("%s%s", "0x", priceFeedID)
+	if _, ok := priceFeedIDsMap[priceFeedIDFormatted]; !ok {
 		return newDataBytes, i
 	}
 	newDataBytes = append(newDataBytes, originalDataBytes[startIndex:i]...)
-	// priceFeed := hex.EncodeToString(originalDataBytes[i:i])
-	// fmt.Println("total price feed data-----", len(priceFeed)/2, priceFeed)
-	// fmt.Println("last byte", originalDataBytes[i-1:i])
+	// Delete the ID from map as it has been added to the packet.
+	delete(priceFeedIDsMap, priceFeedIDFormatted)
 	return newDataBytes, i
-	// fmt.Println("next bytes----", originalDataBytes[i:i+2])
 }
