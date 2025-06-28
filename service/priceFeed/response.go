@@ -13,7 +13,7 @@ type latestPriceUpdateResponse struct {
 	} `json:"binary"`
 }
 
-// Handles autocomplete response received from Ola
+// Unmarshals the response recieved from latest price update API
 func handleLatestPriceUpdateResponse(response *http.Response) (latestPriceUpdateResponse, error) {
 	data, _ := io.ReadAll(response.Body)
 	response.Body.Close()

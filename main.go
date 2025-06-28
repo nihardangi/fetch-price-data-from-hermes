@@ -12,14 +12,4 @@ func main() {
 
 	updatePriceIDs := []string{"0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"}
 	priceFeed.PrepareDataForUpdatePriceFeeds(latestPriceFeedData, updatePriceIDs)
-
-	testSlice := []int{1}
-	// testSlice = append(testSlice, 1)
-	process(testSlice)
-	fmt.Println(testSlice)
-}
-
-func process(testSlice []int) {
-	testSlice[0] = 5
-	testSlice = append(testSlice, 2, 3)
 }
