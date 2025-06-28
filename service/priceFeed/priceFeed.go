@@ -100,14 +100,13 @@ func PrepareDataForUpdatePriceFeeds(hexEncodedData string, priceFeedIDs []string
 	// Add new number of updates i.e total entries in our map.
 	var newNumberOfUpdates uint8 = uint8(len(priceFeedIDsMap))
 	newDataBytes = append(newDataBytes, byte(newNumberOfUpdates))
-	fmt.Println("new updates", byte(newNumberOfUpdates))
 	cursor += numberOfUpdatesBytesLength
 
 	// Parse each update
 	for j := 0; j < int(numberOfUpdates); j++ {
 		newDataBytes, cursor = extractAndAddPriceFeedDataIfPresentInMap(cursor, priceFeedIDsMap, originalDataBytes, newDataBytes)
 	}
-	fmt.Println("newHexData", hex.EncodeToString(newDataBytes))
+	fmt.Printf("\nnewHexData for %d priceFeeds is----------------------------\n%s", newNumberOfUpdates, hex.EncodeToString(newDataBytes))
 	return hex.EncodeToString(newDataBytes), nil
 }
 
@@ -194,7 +193,6 @@ func extractAndAddAccumulatorUpdateHeader(i int, originalDataBytes, newDataBytes
 
 	newDataBytes = append(newDataBytes, originalDataBytes[i:i+int(trailingHeaderLength)]...)
 	i += int(trailingHeaderLength)
-	// fmt.Println("trailingHeaderLen", trailingHeaderLength)
 
 	// Proof type
 	newDataBytes = append(newDataBytes, originalDataBytes[i:i+proofTypeBytes]...)
@@ -245,7 +243,6 @@ func extractAndAddPriceFeedDataIfPresentInMap(i int, priceFeedIDsMap map[string]
 		return []byte{}, 0
 	}
 	i += messageSizeBytes
-	fmt.Println(messageSize)
 
 	// Extract Price Feed ID
 	priceFeedIDBytes := 32
@@ -265,7 +262,6 @@ func extractAndAddPriceFeedDataIfPresentInMap(i int, priceFeedIDsMap map[string]
 
 	singleProofBytes := 20
 	totalProofBytes := singleProofBytes * int(numOfProofs)
-	fmt.Println(i)
 	i += numOfProofsBytes + totalProofBytes
 
 	priceFeedIDFormatted := fmt.Sprintf("%s%s", "0x", priceFeedID)
